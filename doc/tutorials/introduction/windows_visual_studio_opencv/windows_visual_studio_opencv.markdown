@@ -8,6 +8,8 @@ How to build applications with OpenCV inside the "Microsoft Visual Studio" {#tut
 | Original author | Bernát Gábor |
 | Compatibility | OpenCV >= 3.0 |
 
+@tableofcontents
+
 @warning
 This tutorial can contain obsolete information.
 
