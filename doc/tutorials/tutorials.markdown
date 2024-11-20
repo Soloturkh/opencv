@@ -23,3 +23,4 @@ OpenCV Tutorials {#tutorial_root}
 - @subpage tutorial_documentation - This tutorial describes new documenting process and some useful Doxygen features.
 - @subpage tutorial_transition_guide - This document describes some aspects of 2.4 -> 3.0 transition process.
 - @subpage tutorial_cross_referencing - This document outlines how to create cross references to the OpenCV documentation from other Doxygen projects.
+- @subpage tutorial_env_reference - OpenCV can change its behavior depending on the runtime environment variables
