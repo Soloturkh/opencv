@@ -4,12 +4,17 @@
 //
 // Copyright (C) 2018, Intel Corporation, all rights reserved.
 // Third party copyrights are property of their respective owners.
+//
+// Tencent is pleased to support the open source community by making WeChat QRCode available.
+// Copyright (C) 2020 THL A29 Limited, a Tencent company. All rights reserved.
 
 #include "precomp.hpp"
 #include "opencv2/objdetect.hpp"
 #include "opencv2/calib3d.hpp"
 #include <opencv2/core/utils/logger.hpp>
 #include "graphical_code_detector_impl.hpp"
+#include "qbarstruct.hpp"
+#include "qbardecoder.hpp"
 
 #ifdef HAVE_QUIRC
 #include "quirc.h"
@@ -4704,4 +4709,202 @@ void QRCodeDetectorAruco::setArucoParameters(const aruco::DetectorParameters& pa
     std::dynamic_pointer_cast<PimplQRAruco>(p)->arucoDetector.setDetectorParameters(params);
 }
 
+struct PimplWeChat : public GraphicalCodeDetector::Impl {
+    std::shared_ptr<QBarDecoder> qbarDecode_;
+
+    PimplWeChat() {
+        qbarDecode_ = make_shared<QBarDecoder>();
+    }
+
+    bool detect(InputArray img, OutputArray points) const CV_OVERRIDE;
+    string decode(InputArray img, InputArray points, OutputArray straight_qrcode) const CV_OVERRIDE;
+    string detectAndDecode(InputArray img, OutputArray points, OutputArray straight_qrcode) const CV_OVERRIDE;
+    bool detectMulti(InputArray img, OutputArray points) const CV_OVERRIDE;
+    bool decodeMulti(InputArray img, InputArray points, vector<string>& decoded_info, OutputArrayOfArrays straight_qrcode) const CV_OVERRIDE;
+    bool detectAndDecodeMulti(InputArray img, vector<string>& decoded_info, OutputArray points, OutputArrayOfArrays straight_qrcode) const CV_OVERRIDE;
+};
+
+bool PimplWeChat::detect(InputArray img, OutputArray points) const {
+    vector<Point2f> corners, result;
+    bool flag = detectMulti(img, corners);
+    CV_Assert((int)corners.size() % 4 == 0);
+
+    Point2f imageCenter(((float)img.cols())/2.f, ((float)img.rows())/2.f);
+    size_t minQrId = 0ull;
+    float minDist = std::numeric_limits<float>::max();
+    for (size_t i = 0ull; i < corners.size(); i += 4ull) {
+        Point2f qrCenter((corners[i] + corners[i+1ull] + corners[i+2ull] + corners[i+3ull]) / 4.f);
+        float dist = sqrt(normL2Sqr<float>(qrCenter - imageCenter));
+        if (dist < minDist) {
+            minQrId = i;
+            minDist = dist;
+        }
+    }
+    if (flag) {
+        result = {corners[minQrId], corners[minQrId+1ull], corners[minQrId+2ull], corners[minQrId+3ull]};
+        updatePointsResult(points, result);
+    }
+    return flag;
+}
+
+string PimplWeChat::decode(InputArray img, InputArray points, OutputArray straight_qrcode) const {
+    CV_UNUSED(straight_qrcode);
+    vector<string> decoded_info;
+    if (!decodeMulti(img, points, decoded_info, straight_qrcode))
+        return string();
+    if (decoded_info.size() < 1)
+        return string();
+
+    return decoded_info[0];
+}
+
+string PimplWeChat::detectAndDecode(InputArray img, OutputArray points, OutputArray straight_qrcode) const {
+    CV_UNUSED(straight_qrcode);
+
+    if (!detect(img, points))
+        return string();
+
+    return decode(img, points, straight_qrcode);
+}
+
+bool PimplWeChat::detectMulti(InputArray in, OutputArray points) const {
+    Mat gray;
+    if (!checkQRInputImage(in, gray)) {
+        points.release();
+        return false;
+    }
+    
+    std::vector<DetectInfo> _detect_results;
+
+    qbarDecode_->detect(gray, _detect_results);
+
+    vector<Point2f> result;
+    for (size_t i = 0; i < _detect_results.size(); i++) {
+        result.push_back(Point2f(_detect_results[i].x                           , _detect_results[i].y));
+        result.push_back(Point2f(_detect_results[i].x + _detect_results[i].width, _detect_results[i].y));
+        result.push_back(Point2f(_detect_results[i].x                           , _detect_results[i].y + _detect_results[i].height));
+        result.push_back(Point2f(_detect_results[i].x + _detect_results[i].width, _detect_results[i].y + _detect_results[i].height));
+    }
+
+    if (result.size() >= 4) {
+        updatePointsResult(points, result);
+        return true;
+    }
+
+    return false;
+}
+
+bool PimplWeChat::decodeMulti(
+    InputArray img,
+    InputArray points,
+    CV_OUT std::vector<cv::String>& decoded_info,
+    OutputArrayOfArrays straight_qrcode
+) const {
+    CV_UNUSED(straight_qrcode);
+
+    Mat gray;
+    if (!checkQRInputImage(img, gray))
+        return false;
+    
+    CV_Assert(points.size().width > 0);
+    CV_Assert((points.size().width % 4) == 0);
+
+    std::vector<DetectInfo> bboxes;
+    Mat qr_points = points.getMat();
+    qr_points = qr_points.reshape(2, 1);
+    for (int i = 0; i < qr_points.size().width; i += 4)
+    {
+        std::vector<Point2f> tempMat = qr_points.colRange(i, i + 4);
+
+        DetectInfo bbox;
+        bbox.x = tempMat[0].x;
+        bbox.y = tempMat[0].y;
+        bbox.width = tempMat[3].x - tempMat[0].x;
+        bbox.height = tempMat[3].y - tempMat[0].y;
+        bboxes.push_back(bbox);
+    }
+    if (bboxes.size() == 0) {
+        DetectInfo bbox;
+        bbox.x = 0;
+        bbox.y = 0;
+        bbox.width = gray.cols;
+        bbox.height = gray.rows;
+
+        bboxes.push_back(bbox);
+    }
+
+    std::vector<QBAR_RESULT> results;
+    results = qbarDecode_->decode(gray, bboxes);
+
+    decoded_info.clear();
+    for (size_t i = 0; i < results.size(); i++) {
+        if(results[i].typeID != 0)
+            decoded_info.push_back(results[i].data);
+        else
+            decoded_info.push_back("");
+    }
+
+    if (!decoded_info.empty())
+        return true;
+    else
+        return false;
+}
+
+bool PimplWeChat::detectAndDecodeMulti(
+    InputArray img,
+    CV_OUT std::vector<cv::String>& decoded_info,
+    OutputArray points_,
+    OutputArrayOfArrays straight_qrcode
+) const {
+    CV_UNUSED(straight_qrcode);
+
+    if(!detectMulti(img, points_))
+        return false;
+
+    return decodeMulti(img, points_, decoded_info, straight_qrcode);
+}
+
+CodeDetectorWeChat::CodeDetectorWeChat(const std::string& detection_model_path_,
+                            const std::string& super_resolution_model_path_,
+                            const std::vector<DECODER_READER>& readers,
+                            const float detector_iou_thres,
+                            const float score_thres,
+                            const int reference_size) {
+    p = makePtr<PimplWeChat>();
+
+    QBAR_MODE mode;
+    mode.useAI = true;
+    mode.qbar_ml_mode.detection_model_path_ = detection_model_path_;
+    mode.qbar_ml_mode.super_resolution_model_path_ = super_resolution_model_path_;
+
+    int ret = std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->initAIModel(mode.qbar_ml_mode);
+
+    CV_Assert(ret == 0);
+
+    if (readers.empty()) {
+        std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setReaders({QRCODE, PDF417, DATAMATRIX});
+    }
+    else {
+        unordered_set<QBAR_READER> readers_;
+        for (const auto& reader : readers) {
+            readers_.insert(static_cast<QBAR_READER>(reader));
+        }
+        
+        std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setReaders(readers_);
+    }
+
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorReferenceSize(reference_size);
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorScoreThres(score_thres);
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorIouThres(detector_iou_thres);
+}
+
+void CodeDetectorWeChat::setDetectorReferenceSize(int reference_size) {
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorReferenceSize(reference_size);
+}
+void CodeDetectorWeChat::setDetectorScoreThres(float score_thres) {
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorScoreThres(score_thres);
+}
+void CodeDetectorWeChat::setDetectorIouThres(float iou_thres) {
+    std::dynamic_pointer_cast<PimplWeChat>(p)->qbarDecode_->setDetectorIouThres(iou_thres);
+}
 }  // namespace
